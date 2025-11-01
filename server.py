@@ -16,7 +16,7 @@ app = Flask(__name__, template_folder=template_dir)
 # Arduino Setup
 # --------------------------
 ARDUINO_IP = "10.188.91.150"  # update if different
-
+"""
 # --------------------------
 # OpenCV Setup
 # --------------------------
@@ -92,13 +92,15 @@ def process_frame(frame):
     for cup in cups:
         frame = assign_enemy(frame, cup)
     return frame
-
+"""
 # --------------------------
 # Flask routes
 # --------------------------
 @app.get("/")
 def index():
     return render_template("button.html")
+
+
 
 @app.route("/press", methods=["GET", "POST"])
 def press():
@@ -107,7 +109,7 @@ def press():
         return jsonify(ok=True, arduino=r.text)
     except requests.exceptions.RequestException as e:
         return jsonify(ok=False, error=str(e))
-
+"""
 def generate_frames():
     while True:
         ret, frame = cap.read()
@@ -123,6 +125,7 @@ def generate_frames():
 def video_feed():
     return Response(generate_frames(),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
+"""
 
 # --------------------------
 # Run Flask app

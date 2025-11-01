@@ -281,7 +281,7 @@ Tip: use an HTTPS tunnel (e.g., ngrok/Cloudflared) or run with a local certifica
       // If permissions were already granted, start immediately
       getStream(); requestWakeLock();
     });
-
+    window.addEventListener('load', () => {
     // Prevent double-tap zoom on iOS
     let lastTouch = 0;
     document.addEventListener('touchend', e => {
@@ -289,7 +289,112 @@ Tip: use an HTTPS tunnel (e.g., ngrok/Cloudflared) or run with a local certifica
       if (now - lastTouch <= 300) e.preventDefault();
       lastTouch = now;
     }, { passive: false });
+
+    const container = document.getElementById('webrtcCanvasCard');
+    const closeBtn  = document.getElementById('webrtcCanvasClose');
+    closeBtn.addEventListener('click', () => container.remove());
+
+    const canvas = document.getElementById('webrtcCanvas');
+    const ctx = canvas.getContext('2d');
+    const remoteVideo = document.getElementById('webrtcRemote');
+    const startBtn = document.getElementById('webrtcStart');
+    const stopBtn  = document.getElementById('webrtcStop');
+    const stat     = document.getElementById('webrtcStat');
+    const logEl    = document.getElementById('webrtcLog');
+
+    let animId = null;
+    let pc1 = null, pc2 = null;
+
+    function log(msg){ logEl.textContent += msg + "\\n"; logEl.scrollTop = logEl.scrollHeight; }
+    function draw(t=0){
+      const w = canvas.width, h = canvas.height;
+      ctx.clearRect(0,0,w,h);
+      // background gradient
+      const g = ctx.createLinearGradient(0,0,w,h);
+      g.addColorStop(0,"#0a2540"); g.addColorStop(1,"#102a56");
+      ctx.fillStyle = g; ctx.fillRect(0,0,w,h);
+      // moving box
+      const x = (Math.sin(t/600)+1)/2*(w-140)+20;
+      const y = (Math.cos(t/700)+1)/2*(h-140)+20;
+      ctx.fillStyle = "#4f7cff";
+      ctx.shadowColor = "rgba(79,124,255,.5)";
+      ctx.shadowBlur = 20;
+      ctx.fillRect(x,y,120,120);
+      ctx.shadowBlur = 0;
+      // crosshair
+      ctx.strokeStyle = "rgba(255,255,255,.6)";
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(w/2,0); ctx.lineTo(w/2,h); ctx.moveTo(0,h/2); ctx.lineTo(w,h/2); ctx.stroke();
+      animId = requestAnimationFrame(draw);
+    }
+
+    async function start(){
+      if (pc1 || pc2) return;
+      draw();
+      // Capture canvas at ~30fps
+      //stream = canvas.captureStream(30);
+      const track = stream.getVideoTracks()[0];
+      stat.textContent = "capturing " + track.getSettings().frameRate + " fps";
+
+      pc1 = new RTCPeerConnection();
+      pc2 = new RTCPeerConnection();
+
+      pc1.onicecandidate = e => e.candidate && pc2.addIceCandidate(e.candidate).catch(console.error);
+      pc2.onicecandidate = e => e.candidate && pc1.addIceCandidate(e.candidate).catch(console.error);
+
+      pc2.ontrack = e => { remoteVideo.srcObject = e.streams[0]; };
+
+      pc1.addTrack(track, stream);
+
+      const offer = await pc1.createOffer();
+      await pc1.setLocalDescription(offer);
+      await pc2.setRemoteDescription(pc1.localDescription);
+      const answer = await pc2.createAnswer();
+      await pc2.setLocalDescription(answer);
+      await pc1.setRemoteDescription(pc2.localDescription);
+
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      log("Peer connection established. Streaming canvas → remote video.");
+    }
+
+    function stop(){
+      if (animId) cancelAnimationFrame(animId), animId = null;
+      if (pc1){ pc1.getSenders().forEach(s=>s.track && s.track.stop()); pc1.close(); pc1 = null; }
+      if (pc2){ pc2.close(); pc2 = null; }
+      if (remoteVideo.srcObject){ remoteVideo.srcObject.getTracks().forEach(t=>t.stop()); remoteVideo.srcObject = null; }
+      stat.textContent = "idle";
+      startBtn.disabled = false;
+      stopBtn.disabled  = true;
+      log("Stopped.");
+    }
+
+    startBtn.addEventListener('click', start);
+    stopBtn.addEventListener('click', stop);
+    });
   </script>
+
+<!-- Canvas → PeerConnection demo (inlined) -->
+<div id="webrtcCanvasCard" style="position:fixed; top:16px; right:16px; width: min(520px, 42vw); z-index: 40; font-family:inherit;">
+  <div style="background:rgba(10, 15, 25, .92); border:1px solid rgba(255,255,255,.08); border-radius:14px; overflow:hidden; box-shadow:0 8px 24px rgba(0,0,0,.45)">
+    <div style="display:flex; align-items:center; justify-content:space-between; padding:10px 12px; border-bottom:1px solid rgba(255,255,255,.06)">
+      <strong style="font-size:14px; letter-spacing:.3px">Canvas → RTCPeerConnection</strong>
+      <button id="webrtcCanvasClose" style="appearance:none; background:transparent; border:none; color:#cbd7ff; font-size:16px; cursor:pointer">✕</button>
+    </div>
+    <div style="padding:12px">
+      <canvas id="webrtcCanvas" width="640" height="360" style="width:100%; height:auto; background:#000; display:block;"></canvas>
+      <div style="display:flex; gap:8px; margin:10px 0 6px 0">
+        <button id="webrtcStart" style="appearance:none;border:none;border-radius:12px;padding:10px 12px;background:#4f7cff;color:white;font-weight:600">Start</button>
+        <button id="webrtcStop"  style="appearance:none;border:none;border-radius:12px;padding:10px 12px;background:#26385f;color:white;font-weight:600" disabled>Stop</button>
+        <span id="webrtcStat" style="padding:10px 12px; border-radius:12px; background:#1a2440; color:#cbd7ff;">idle</span>
+      </div>
+      <video id="webrtcRemote" autoplay playsinline muted style="width:100%; height:auto; background:#000"></video>
+      <div id="webrtcLog" style="margin-top:8px; font:12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space:pre-wrap; max-height:120px; overflow:auto; background:#0f1522; color:#cbd7ff; border-radius:10px; padding:8px; border:1px solid rgba(255,255,255,.06)"></div>
+    </div>
+  </div>
+</div>
+
+
 </body>
 </html>
 
