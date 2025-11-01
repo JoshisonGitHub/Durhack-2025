@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>AR Trigger + Camera</title>
+  <style>
+    :root { --safe-bottom: env(safe-area-inset-bottom, 0px); }
+    html, body {
+      height: 100%; margin: 0; background:#000; color:#eaeef7;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      overflow: hidden; /* prevent scroll when button is sticky */
+    }
+    /* Full-bleed camera */
+    .stage {
+      position: fixed; inset: 0;
+      background: #000;
+    }
+    video#cam {
+      width: 100vw; height: 100vh;
+      object-fit: cover;            /* fill the screen */
+      object-position: center;
+      background: #000;
+    }
+    /* UI overlay */
+    .hud {
+      position: fixed; inset: 0; pointer-events: none;
+    }
+    .topbar {
+      position: absolute; top: 10px; left: 10px; right: 10px;
+      display: flex; gap: 10px; justify-content: space-between; align-items: center;
+      pointer-events: none;
+    }
+    .pill {
+      pointer-events: auto;
+      background: rgba(0,0,0,.45); color:#fff; border:1px solid rgba(255,255,255,.12);
+      padding: 8px 12px; border-radius: 999px; font-size: 14px;
+      backdrop-filter: blur(6px);
+    }
+    .right {
+      display: flex; gap: 8px;
+    }
+    .btn {
+      pointer-events: auto;
+      appearance: none; border: none; border-radius: 14px;
+      padding: 10px 12px; font-size: 14px; background: rgba(0,0,0,.45); color:#fff;
+      border:1px solid rgba(255,255,255,.12);
+    }
+    .bar {
+      position: fixed; left: 0; right: 0; bottom: 0;
+      padding: 12px 16px calc(12px + var(--safe-bottom));
+      backdrop-filter: blur(10px);
+      background: linear-gradient(to top, rgba(0,0,0,.5), rgba(0,0,0,0));
+      border-top: 1px solid rgba(255,255,255,.08);
+      pointer-events: auto;
+    }
+    .big {
+      appearance: none; width: 100%;
+      font-size: 22px; font-weight: 700; letter-spacing: .3px;
+      padding: 18px 22px; border-radius: 16px; border: none;
+      background: #4f7cff; color: white;
+      box-shadow: 0 8px 24px rgba(79,124,255,.35), inset 0 -2px 0 rgba(0,0,0,.15);
+      touch-action: manipulation;
+    }
+    .big:active { transform: translateY(1px); filter: brightness(.98); }
+    .big[disabled] { opacity: .6; filter: grayscale(.2); box-shadow: none; }
+
+    .toast {
+      position: fixed; left: 50%; bottom: calc(86px + var(--safe-bottom));
+      transform: translateX(-50%);
+      background: #1b2130; color: #eaeef7;
+      padding: 10px 14px; border-radius: 12px;
+      font-size: 14px; opacity: 0; pointer-events: none;
+      transition: opacity .2s ease;
+      border: 1px solid rgba(255,255,255,.08);
+    }
+    .toast.show { opacity: 1; }
+    .err {
+      position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
+      background: rgba(0,0,0,.7); padding: 14px 16px; border-radius: 12px; border:1px solid rgba(255,255,255,.1);
+      max-width: 90vw; text-align: center; font-size: 14px;
+    }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div class="stage">
+    <video id="cam" autoplay playsinline muted></video>
+  </div>
+
+  <div class="hud">
+    <div class="topbar">
+      <div id="status" class="pill">Camera: starting…</div>
+      <div class="right">
+        <button id="toggleFacing" class="btn" title="Flip camera">Flip</button>
+        <button id="pauseResume" class="btn" title="Pause/Resume">Pause</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="bar">
+    <button id="actionBtn" class="big">PRESS</button>
+  </div>
+
+  <div id="toast" class="toast">Sent ✅</div>
+  <div id="err" class="err hidden"></div>
+
+  <script>
+    // Use relative URL so it works regardless of IP/host:
+    const PRESS_URL = "/press";
+
+    const video = document.getElementById('cam');
+    const statusEl = document.getElementById('status');
+    const toast = document.getElementById('toast');
+    const errBox = document.getElementById('err');
+    const actionBtn = document.getElementById('actionBtn');
+    const toggleBtn = document.getElementById('toggleFacing');
+    const pauseBtn = document.getElementById('pauseResume');
+
+    let stream = null;
+    let facing = 'environment'; // start with rear camera if available
+    let busy = false;
+    let wakeLock = null;
+
+    function showToast(msg) {
+      toast.textContent = msg;
+      toast.classList.add('show');
+      clearTimeout(showToast._t);
+      showToast._t = setTimeout(() => toast.classList.remove('show'), 1200);
+    }
+    function showError(msg) {
+      errBox.textContent = msg;
+      errBox.classList.remove('hidden');
+    }
+    function clearError() {
+      errBox.classList.add('hidden');
+      errBox.textContent = '';
+    }
+    function haptics() {
+      if (navigator.vibrate) navigator.vibrate(10);
+    }
+
+    async function getStream() {
+      clearError();
+      // Stop old tracks
+      if (stream) stream.getTracks().forEach(t => t.stop());
+      const constraints = {
+        audio: false,
+        video: {
+          facingMode: { ideal: facing },     // 'environment' or 'user'
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        }
+      };
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
+        video.srcObject = stream;
+        statusEl.textContent = `Camera: ${facing === 'environment' ? 'Rear' : 'Front'}`;
+        // Autoplay on iOS requires user gesture if not muted; video is muted, playsinline.
+        await video.play().catch(() => {});
+      } catch (e) {
+        console.error(e);
+        let msg = String(e && e.message || e);
+        if (/secure context|https/i.test(msg)) {
+          msg = "Camera blocked: many browsers require HTTPS for camera access on local IPs. \
+Tip: use an HTTPS tunnel (e.g., ngrok/Cloudflared) or run with a local certificate.";
+        } else if (/NotAllowedError/i.test(msg)) {
+          msg = "Camera permission denied. Please allow camera access in your browser settings.";
+        } else if (/NotFoundError|OverconstrainedError/i.test(msg)) {
+          msg = "Requested camera not available. Try flipping cameras.";
+        }
+        statusEl.textContent = "Camera: error";
+        showError(msg);
+      }
+    }
+
+    async function toggleFacingMode() {
+      facing = (facing === 'environment') ? 'user' : 'environment';
+      await getStream();
+    }
+
+    function pauseResume() {
+      if (!stream) return;
+      const tracks = stream.getVideoTracks();
+      if (tracks.length) {
+        const t = tracks[0];
+        if (t.enabled) {
+          t.enabled = false;
+          pauseBtn.textContent = "Resume";
+          statusEl.textContent = "Camera: paused";
+        } else {
+          t.enabled = true;
+          pauseBtn.textContent = "Pause";
+          statusEl.textContent = `Camera: ${facing === 'environment' ? 'Rear' : 'Front'}`;
+        }
+      }
+    }
+
+    async function requestWakeLock() {
+      try {
+        if ('wakeLock' in navigator) {
+          wakeLock = await navigator.wakeLock.request('screen');
+          document.addEventListener('visibilitychange', async () => {
+            if (document.visibilityState === 'visible' && wakeLock && wakeLock.released) {
+              wakeLock = await navigator.wakeLock.request('screen');
+            }
+          });
+        }
+      } catch {}
+    }
+
+    async function sendPress() {
+      if (busy) return;
+      busy = true; actionBtn.disabled = true; haptics();
+      try {
+        const res = await fetch(PRESS_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          cache: 'no-store',
+          body: JSON.stringify({ t: Date.now(), source: 'phone' }),
+          keepalive: true
+        });
+        if (!res.ok) throw new Error('HTTP '+res.status);
+        showToast('Sent ✅');
+      } catch (e) {
+        // Fallback GET (works even if CORS settings get weird)
+        try {
+          const img = new Image();
+          img.src = PRESS_URL + (PRESS_URL.includes('?') ? '&' : '?') + 't=' + Date.now();
+          await new Promise(r => setTimeout(r, 300));
+          showToast('Sent (fallback) ✅');
+        } catch { showToast('Failed ❌'); }
+      } finally {
+        setTimeout(() => { busy = false; actionBtn.disabled = false; }, 250);
+      }
+    }
+
+    toggleBtn.addEventListener('click', toggleFacingMode);
+    pauseBtn.addEventListener('click', pauseResume);
+    actionBtn.addEventListener('click', sendPress);
+
+    // Kick things off after a user gesture (helps iOS)
+    window.addEventListener('load', () => {
+      // If permissions were already granted, start immediately
+      getStream(); requestWakeLock();
+    });
+
+    // Prevent double-tap zoom on iOS
+    let lastTouch = 0;
+    document.addEventListener('touchend', e => {
+      const now = Date.now();
+      if (now - lastTouch <= 300) e.preventDefault();
+      lastTouch = now;
+    }, { passive: false });
+  </script>
+</body>
+</html>
+
