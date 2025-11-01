@@ -82,6 +82,40 @@
       max-width: 90vw; text-align: center; font-size: 14px;
     }
     .hidden { display: none; }
+
+    .crosshair {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      width: 40px;
+      height: 40px;
+      transform: translate(-50%, -50%);
+      pointer-events: none; /* don't block clicks */
+    }
+
+    .crosshair::before,
+    .crosshair::after {
+      content: "";
+      position: absolute;
+      background: rgba(255, 255, 255, 0.8);
+    }
+
+    .crosshair::before {
+      left: 50%;
+      top: 0;
+      width: 2px;
+      height: 100%;
+      transform: translateX(-50%);
+    }
+
+    .crosshair::after {
+      top: 50%;
+      left: 0;
+      width: 100%;
+      height: 2px;
+      transform: translateY(-50%);
+    }
+
   </style>
 </head>
 <body>
@@ -98,6 +132,8 @@
       </div>
     </div>
   </div>
+
+  <div class="crosshair"></div>
 
   <div class="bar">
     <button id="actionBtn" class="big">PRESS</button>
