@@ -24,10 +24,6 @@ from aiortc.contrib.media import MediaBlackhole
 from av import VideoFrame
 """
 
-# --- WebRTC globals ---
-pcs = set()
-_latest_jpeg = None
-_latest_lock = threading.Lock()
 
 # --------------------------
 # Flask Setup
@@ -35,6 +31,8 @@ _latest_lock = threading.Lock()
 base_dir = os.path.dirname(os.path.abspath(__file__))
 template_dir = os.path.join(base_dir, "templates")
 app = Flask(__name__, template_folder=template_dir)
+pcs = set()
+logger = logging.getLogger("pc")
 
 # --------------------------
 # Arduino Setup
@@ -149,107 +147,111 @@ def video_feed():
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 """
 
-# --------------------------
-# WebRTC: receive video from browser
-# --------------------------
-async def _consume_video(track):
-    global _latest_jpeg
-    import cv2
-    while True:
-        frame = await track.recv()
-        # Convert to JPEG bytes for optional preview endpoints
-        img = frame.to_ndarray(format="bgr24")
-        ok, buf = cv2.imencode(".jpg", img)
-        if ok:
-            with _latest_lock:
-                _latest_jpeg = buf.tobytes()
+class VideoTransformTrack(MediaStreamTrack):
+	kind = "video"
+	def __init__(self, track, transform):
+		super().__init__()
+		self.track = track
+		self.transform = transform
 
-@app.post("/offer")
-def offer():
-    # Accept a WebRTC SDP offer from the browser, create an answer, and
-    # start reading the incoming video track.
-    # Requires: pip install aiortc av opencv-python
-    params = request.get_json(force=True, silent=False)
-    offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
+	async def recv(self):
+		frame = await self.track.recv()
 
-    async def run():
-        pc = RTCPeerConnection()
-        pcs.add(pc)
+		if self.transform == "<some tranformation>":
+			pass
+		else:
+			return frame
 
-        @pc.on("connectionstatechange")
-        async def on_state():
-            if pc.connectionState in ("failed", "closed", "disconnected"):
-                await pc.close()
-                pcs.discard(pc)
+class OpenCVMediaStreamTrack(MediaStreamTrack):
+	kind = "video"
+	
+	def __init__(self, device_index=0):
+		super().__init__()
+		self.cam = cv2.VideoCapture(device_index)
 
-        @pc.on("track")
-        async def on_track(track):
-            if track.kind == "video":
-                # consume frames (update _latest_jpeg)
-                asyncio.create_task(_consume_video(track))
-            else:
-                # if an audio track ever arrives, sink it
-                bh = MediaBlackhole()
-                await bh.start()
-        await pc.setRemoteDescription(offer)
-        answer = await pc.createAnswer()
-        await pc.setLocalDescription(answer)
-        return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+	async def recv(self):
+		success, frame = self.cam.read()
+		if not success:
+			raise Exception("Failed to capture frames")
+		
+		# Convert the image from OpenCV format to AV format
+		frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+		frame = VideoFrame.from_ndarray(frame, format="rgb24")
+		frame.pts = frame.time_base = None
+		return frame
 
-    # run the async logic in this sync Flask route
-    return jsonify(asyncio.run(run()))
-"""
-from fastapi.responses import StreamingResponse
+@app.route('/offer', methods=['POST'])
+async def offer():
+	params = request.get_json() # synchronous
+	if not params:
+		return jsonify({"error": "Invalid JSON data"}), 400
+	offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
+	pc = RTCPeerConnection()
+	pc_id = "PeerConnection(%s)" % uuid.uuid4()
+	pcs.add(pc)
 
-@app.get("/signal")
-async def stream_updates(webrtc_id: str):
-    async def output_stream():
-        async for output in stream.output_stream(webrtc_id):
-            # Output is the AdditionalOutputs instance
-            # Be sure to serialize it however you would like
-            yield f"data: {output.args[0]}\n\n"
+	def log_info(msg, *args):
+		logger.info(pc_id + " " + msg, *args)
 
-    return StreamingResponse(
-        output_stream(), 
-        media_type="text/event-stream"
-    )
-"""
-@app.get("/webrtc_preview")
-def webrtc_preview():
-    def gen():
-        boundary = b"--frame\r\n"
-        while True:
-            with _latest_lock:
-                data = _latest_jpeg
-            if data is not None:
-                yield boundary + b"Content-Type: image/jpeg\r\n\r\n" + data + b"\r\n"
-            else:
-                import time; time.sleep(0.05)
-    return Response(gen(), mimetype="multipart/x-mixed-replace; boundary=frame")
+	log_info("Created for %s", request.remote_addr)
+
+	# player = MediaPlayer('video=Integrated Camera', format='dshow', options={'frame_rate': "60", 'video_size': '640x480'})
+	if args.record_to:
+		recorder = MediaRecorder(args.record_to)
+	else:
+		recorder = MediaBlackhole()
+
+	@pc.on("connectionstatechange")
+	async def on_connectionstatechange():
+		log_info("Connection state is %s", pc.connectionState)
+		if pc.connectionState == "failed":
+			await pc.close()
+			pcs.discard(pc)
+
+	@pc.on("track")
+	async def on_track(track):
+		log_info("Track %s received", track.kind)
+		
+		if track.kind == "audio":
+			pc.addTrack(track)
+			recorder.addTrack(track)
+		elif track.kind == "video":
+			# pc.addTrack(VideoTransformTrack(relay.subscribe(track)), transform=params["video_transform"])
+			video_track = OpenCVMediaStreamTrack(device_index=0)
+			print(video_track)
+			pc.addTrack(VideoTransformTrack(video_track, transform=params.get("video_transform", "")))
+			if args.record_to:
+				recorder.addTrack(video_track)
+		
+		@track.on("ended")
+		async def on_ended():
+			log_info("Track %s ended", track.kind)
+			await recorder.stop()
+
+	# handle offer
+	await pc.setRemoteDescription(offer)
+	await recorder.start()
+
+	# send answer
+	answer = await pc.createAnswer()
+	await pc.setLocalDescription(answer)
+
+	# Handle offer
+	# loop = asyncio.new_event_loop()
+	# asyncio.set_event_loop(loop)
+	# loop.run_until_complete(pc.setRemoteDescription(offer))
+	# loop.run_until_complete(recorder.start())
+
+	# # Send answer
+	# answer = loop.run_until_complete(pc.createAnswer())
+	# loop.run_until_complete(pc.setLocalDescription(answer))
+	
+	return jsonify({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type})
 
 
 
-
-
-
-#if __name__ == "__main__":
-#    app.run(host="0.0.0.0", port=5000, use_reloader=False, threaded=False)
-
-
-
-
-
-
-"""
-# --------------------------
-# Run Flask app
-# --------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
-
-    app2 = webcam.web.Application()
-    app2.on_shutdown.append(webcam.on_shutdown)
-    app2.router.add_get("/", index)
-    app2.router.add_post("/offer", offer)
-    webcam.web.run_app(app2, host="0.0.0.0", port=8080)
-"""
+    parser = argparse.ArgumentParser(description="WebRTC+Flask Live Streaming Application")
+    parser.add_argument("--record_to", help="Write received media to a file")
+    args = parser.parse_args()
+    app.run(host="0.0.0.0", port=5000, use_reloader=False)

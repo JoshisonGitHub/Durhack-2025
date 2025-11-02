@@ -141,7 +141,7 @@
 
   <div id="toast" class="toast">Sent ✅</div>
   <div id="err" class="err hidden"></div>
-  <!--
+  <script src="static/main.js"></script>
   <script>
     // Use relative URL so it works regardless of IP/host:
     const PRESS_URL = "/press";
@@ -384,8 +384,8 @@ signaler.onmessage = async ({ data: { description, candidate } }) => {
     console.error(err);
   }
 };
-    }*/
-    var pc = null;
+    }
+
 
 function negotiate() {
     pc.addTransceiver('video', {direction: 'recvonly'});
@@ -461,11 +461,10 @@ function negotiate() {
       pc.close();
   }, 500);
   }
-
+  */
   window.addEventListener('beforeunload', () => { try { pc && pc.close(); } catch {} });
 
 </script>
--->
 </body>
 </html>
 
