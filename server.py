@@ -218,7 +218,6 @@ async def offer():
 		elif track.kind == "video":
 			# pc.addTrack(VideoTransformTrack(relay.subscribe(track)), transform=params["video_transform"])
 			video_track = OpenCVMediaStreamTrack(device_index=0)
-			print(video_track)
 			pc.addTrack(VideoTransformTrack(video_track, transform=params.get("video_transform", "")))
 			if args.record_to:
 				recorder.addTrack(video_track)
