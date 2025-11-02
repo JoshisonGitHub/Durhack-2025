@@ -4,6 +4,30 @@ from flask import Flask, render_template, jsonify, Response
 import cv2
 import numpy as np
 from glob import glob
+import webcam
+
+
+import asyncio
+from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
+from aiortc.contrib.media import MediaRecorder, MediaBlackhole
+from flask import Flask, render_template, request, jsonify
+import cv2
+import uuid
+import logging
+from av import VideoFrame
+import argparse
+"""
+import asyncio
+from flask import request
+from aiortc import RTCPeerConnection, RTCSessionDescription
+from aiortc.contrib.media import MediaBlackhole
+from av import VideoFrame
+"""
+
+# --- WebRTC globals ---
+pcs = set()
+_latest_jpeg = None
+_latest_lock = threading.Lock()
 
 # --------------------------
 # Flask Setup
@@ -100,8 +124,6 @@ def process_frame(frame):
 def index():
     return render_template("button.html")
 
-
-
 @app.route("/press", methods=["GET", "POST"])
 def press():
     try:
@@ -128,7 +150,106 @@ def video_feed():
 """
 
 # --------------------------
+# WebRTC: receive video from browser
+# --------------------------
+async def _consume_video(track):
+    global _latest_jpeg
+    import cv2
+    while True:
+        frame = await track.recv()
+        # Convert to JPEG bytes for optional preview endpoints
+        img = frame.to_ndarray(format="bgr24")
+        ok, buf = cv2.imencode(".jpg", img)
+        if ok:
+            with _latest_lock:
+                _latest_jpeg = buf.tobytes()
+
+@app.post("/offer")
+def offer():
+    # Accept a WebRTC SDP offer from the browser, create an answer, and
+    # start reading the incoming video track.
+    # Requires: pip install aiortc av opencv-python
+    params = request.get_json(force=True, silent=False)
+    offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
+
+    async def run():
+        pc = RTCPeerConnection()
+        pcs.add(pc)
+
+        @pc.on("connectionstatechange")
+        async def on_state():
+            if pc.connectionState in ("failed", "closed", "disconnected"):
+                await pc.close()
+                pcs.discard(pc)
+
+        @pc.on("track")
+        async def on_track(track):
+            if track.kind == "video":
+                # consume frames (update _latest_jpeg)
+                asyncio.create_task(_consume_video(track))
+            else:
+                # if an audio track ever arrives, sink it
+                bh = MediaBlackhole()
+                await bh.start()
+        await pc.setRemoteDescription(offer)
+        answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
+        return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+
+    # run the async logic in this sync Flask route
+    return jsonify(asyncio.run(run()))
+"""
+from fastapi.responses import StreamingResponse
+
+@app.get("/signal")
+async def stream_updates(webrtc_id: str):
+    async def output_stream():
+        async for output in stream.output_stream(webrtc_id):
+            # Output is the AdditionalOutputs instance
+            # Be sure to serialize it however you would like
+            yield f"data: {output.args[0]}\n\n"
+
+    return StreamingResponse(
+        output_stream(), 
+        media_type="text/event-stream"
+    )
+"""
+@app.get("/webrtc_preview")
+def webrtc_preview():
+    def gen():
+        boundary = b"--frame\r\n"
+        while True:
+            with _latest_lock:
+                data = _latest_jpeg
+            if data is not None:
+                yield boundary + b"Content-Type: image/jpeg\r\n\r\n" + data + b"\r\n"
+            else:
+                import time; time.sleep(0.05)
+    return Response(gen(), mimetype="multipart/x-mixed-replace; boundary=frame")
+
+
+
+
+
+
+#if __name__ == "__main__":
+#    app.run(host="0.0.0.0", port=5000, use_reloader=False, threaded=False)
+
+
+
+
+
+
+"""
+# --------------------------
 # Run Flask app
 # --------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
+    app2 = webcam.web.Application()
+    app2.on_shutdown.append(webcam.on_shutdown)
+    app2.router.add_get("/", index)
+    app2.router.add_post("/offer", offer)
+    webcam.web.run_app(app2, host="0.0.0.0", port=8080)
+"""
